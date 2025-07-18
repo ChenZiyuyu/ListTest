@@ -2,6 +2,8 @@ package com.example.listtest
 
 import android.os.Bundle
 import android.util.Log
+import android.view.View
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -9,86 +11,126 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.gson.Gson
 import okhttp3.*
 import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.*
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var recyclerView: RecyclerView
     private lateinit var newsAdapter: NewsAdapter
+    private lateinit var emptyView: TextView
 
-    // 创建 OkHttpClient 和 Gson 实例
     private val client = OkHttpClient()
     private val gson = Gson()
+
+    private val TAG = "MainActivityNews"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
         recyclerView = findViewById(R.id.recyclerView)
-        recyclerView.layoutManager = LinearLayoutManager(this)
+        emptyView = findViewById(R.id.emptyView)
 
-        // 初始化适配器
+        recyclerView.layoutManager = LinearLayoutManager(this)
         newsAdapter = NewsAdapter(emptyList())
         recyclerView.adapter = newsAdapter
+        recyclerView.addItemDecoration(StickyHeaderDecoration(newsAdapter))
 
-        // 获取新闻数据
+        // 恢复调用真实的网络请求
         fetchNews()
-
     }
 
-
     private fun fetchNews() {
+        Log.d(TAG, "开始从网络获取新闻...")
+        emptyView.text = "正在加载新闻..."
+        emptyView.visibility = View.VISIBLE
+        recyclerView.visibility = View.GONE
 
-        val url = "https://news.cj.sina.cn/app/v1/news724/list?from=hmwidget&version=8.16.0&deviceId=0062738dda096582bead16efd7d0dd72&is_important=0&tag=0&nonce=72000382&ts=1752547529&sign=c5cc82cb675340e53ccb43130a8389e1&apptype=10&id=&dire=f&up=0&num=20&deviceid=0062738dda096582bead16efd7d0dd72"     //        // 这是必须的 User-Agent
-        val userAgent =
-            "sinafinancehmscar__1.1.11__android__f41eb02ce388f1c086eb8d24a821c18c__12__OCE-AN50"
 
-        // 创建一个 Request，并添加 User-Agent 请求头
+        val url = "https://news.cj.sina.cn/app/v1/news724/list?from=hmwidget&version=8.16.0&deviceId=0062738dda096582bead16efd7d0dd72&is_important=0&tag=0&nonce=72000382&ts=1752547529&sign=c5cc82cb675340e53ccb43130a8389e1&apptype=10&id=&dire=f&up=0&num=20&deviceid=0062738dda096582bead16efd7d0dd72"
+        val userAgent = "sinafinancehmscar__1.1.11__android__f41eb02ce388f1c086eb8d24a821c18c__12__OCE-AN50"
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", userAgent)
             .build()
 
-        // 异步执行请求
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
+                Log.e(TAG, "网络请求失败", e)
                 runOnUiThread {
+                    emptyView.text = "加载失败，请检查网络"
                     Toast.makeText(applicationContext, "网络请求失败: ${e.message}", Toast.LENGTH_LONG).show()
                 }
-                Log.e("MainActivity", "OkHttp Failed", e)
             }
 
-            // 请求成功时的回调
             override fun onResponse(call: Call, response: Response) {
-                // 检查响应是否成功
                 if (!response.isSuccessful) {
+                    Log.e(TAG, "请求失败，状态码: ${response.code}")
                     runOnUiThread {
-                        Toast.makeText(applicationContext, "请求失败，状态码: ${response.code}", Toast.LENGTH_SHORT).show()
+                        emptyView.text = "加载失败 (Code: ${response.code})"
                     }
                     return
                 }
 
-                // 获取响应体
                 val responseBody = response.body?.string()
-                if (responseBody != null) {
-                    Log.d("JSON_RESPONSE", "收到的原始JSON: $responseBody")
-                    try {
-                        // 使用 Gson 解析 JSON
-                        val topLevelResponse = gson.fromJson(responseBody, TopLevelResponse::class.java)
-                        // 根据新的数据结构层层深入，获取新闻列表
-                        val newsList = topLevelResponse.result.data.newsList
+                Log.d(TAG, "收到的原始JSON: $responseBody")
 
-                        // 切换回 UI 线程来更新 RecyclerView
-                        runOnUiThread {
-                            newsAdapter.updateData(newsList)
+                if (responseBody.isNullOrEmpty()) {
+                    Log.w(TAG, "服务器返回内容为空")
+                    runOnUiThread {
+                        emptyView.text = "没有获取到任何内容"
+                    }
+                    return
+                }
+
+                try {
+                    val topLevelResponse = gson.fromJson(responseBody, TopLevelResponse::class.java)
+                    val newsList = topLevelResponse.result.data.newsList
+                    Log.d(TAG, "Gson解析成功，原始新闻数量: ${newsList.size}")
+
+                    val timelineItems = processNewsIntoTimeline(newsList)
+                    Log.d(TAG, "数据处理完成，最终列表项数量: ${timelineItems.size}")
+
+                    runOnUiThread {
+                        if (timelineItems.isEmpty()) {
+                            emptyView.text = "暂无新闻"
+                            emptyView.visibility = View.VISIBLE
+                            recyclerView.visibility = View.GONE
+                        } else {
+                            newsAdapter.updateItems(timelineItems)
+                            emptyView.visibility = View.GONE
+                            recyclerView.visibility = View.VISIBLE
                         }
-                    } catch (e: Exception) {
-                        Log.e("MainActivity", "JSON 解析失败", e)
-                        runOnUiThread {
-                            Toast.makeText(applicationContext, "数据解析错误", Toast.LENGTH_SHORT).show()
-                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "JSON解析或数据处理失败", e)
+                    runOnUiThread {
+                        emptyView.text = "数据解析错误"
                     }
                 }
             }
         })
+    }
+
+    private fun processNewsIntoTimeline(newsList: List<NewsItem>): List<TimelineItem> {
+        val timelineItems = mutableListOf<TimelineItem>()
+        val dateFormat = SimpleDateFormat("yyyy年M月d日", Locale.getDefault())
+
+        val sortedNews = newsList.filter { it.time?.toLongOrNull() != null }
+            .sortedByDescending { it.time!!.toLong() }
+
+        val groupedNews = sortedNews.groupBy { newsItem ->
+            val timestampMs = newsItem.time!!.toLong() * 1000L
+            dateFormat.format(Date(timestampMs))
+        }
+
+        groupedNews.forEach { (date, newsOnDate) ->
+            timelineItems.add(TimelineItem.DateHeader(date))
+            newsOnDate.forEach { news ->
+                timelineItems.add(TimelineItem.NewsArticle(news))
+            }
+        }
+        return timelineItems
     }
 }
